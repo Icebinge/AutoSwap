@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import cv2
 
+rng = np.random.default_rng(42)
+
 def mask_score(mask):
     """
     根据连接性对掩码进行评分。
@@ -142,10 +144,12 @@ def get_bbox_from_mask(mask):
         边界框坐标 (y1, y2, x1, x2)
     """
     h, w = mask.shape[0], mask.shape[1]
+    if mask.sum() < 10:
+        return 0, h, 0, w
     rows = np.any(mask, axis = 1)
     cols = np.any(mask, axis = 0)
-    y1, y2 = np.where(rows)[0][[0, -1]]
-    x1, x2 = np.where(cols)[0][[0, -1]]
+    y1, y2 = np.nonzero(rows)[0][[0, -1]]
+    x1, x2 = np.nonzero(cols)[0][[0, -1]]
     return (y1, y2, x1, x2)
 
 def expand_bbox(mask, yyxx, ratio=[1.2, 2.0], min_crop=0):
@@ -163,7 +167,7 @@ def expand_bbox(mask, yyxx, ratio=[1.2, 2.0], min_crop=0):
     """
     y1, y2, x1, x2 = yyxx
     h, w = mask.shape[0], mask.shape[1]
-    ratio = np.random.randint(ratio[0] * 10, ratio[1] * 10) / 10
+    ratio = rng.integers(ratio[0] * 10, ratio[1] * 10) / 10
     xc = (x1 + x2) / 2
     yc = (y1 + y2) / 2
 
@@ -217,7 +221,7 @@ def pad_to_square(image, pad_value = 255, random = False):
         return image
     padd = abs(h - w)
     if random:
-        padd_1 = int(np.random.randint(0, padd))
+        padd_1 = int(rng.integers(0, padd))
     else:
         padd_1 = padd // 2
     padd_2 = padd - padd_1
@@ -266,7 +270,7 @@ def shuffle_image(image, N):
                           j * block_width : (j + 1) * block_width]
             blocks.append(block)
     
-    np.random.shuffle(blocks)
+    rng.shuffle(blocks)
     shuffled_image = np.zeros((height, width, 3), dtype = np.uint8)
 
     for i in range(N):
@@ -291,7 +295,7 @@ def get_mosaic_mask(image, fg_mask, N = 16, ratio = 0.5):
     """
     ids = [i for i in range(N * N)]
     masked_number = int(N * N * ratio)
-    masked_id = np.random.choice(ids, masked_number, replace=False)
+    masked_id = rng.choice(ids, masked_number, replace=False)
 
     height, width = image.shape[:2]
     mask = np.ones((height, width))
@@ -311,3 +315,123 @@ def get_mosaic_mask(image, fg_mask, N = 16, ratio = 0.5):
     noise_mask = image * mask3 + noise * (1 - mask3)
     return noise_mask
 
+def extract_canney_noise(image, mask, dilate = True):
+    """
+    从图像中提取噪声，并结合Canny边缘检测结果生成带噪声的图像。
+
+    参数:
+        image: 输入图像（NumPy 数组，形状为 (height, width, channels)）
+        mask: 输入掩码（二值掩码，值为 0 或 1，表示前景和背景）
+        dilate: 是否对掩码进行膨胀操作（默认为 True）
+
+    返回:
+        canny_noise: 处理后的图像，包含噪声和Canny边缘
+    """
+    h, w = image.shape[:2]
+    mask = cv2.resize(mask.astype(np.uint8), (w, h)) > 0.5
+    kernel = np.ones((8, 8), dtype=np.uint8)
+    mask = cv2.erode(mask.astype(np.uint8), kernel, 10)
+
+    canny = cv2.Canny(image, 50, 100) * mask
+    if dilate:
+        kernel = np.ones((8, 8), dtype=np.uint8)
+        mask = (cv2.dilate(canny, kernel, 5) > 128).astype(np.uint8)
+    else:
+        mask = canny > 128
+    
+    mask = np.stack([mask, mask, mask], -1)
+
+    pure_noise = 255
+    canny_noise = mask * image + (1 - mask) * pure_noise
+    return canny_noise
+
+def get_random_structure(size):
+    """
+    根据给定的大小生成随机形状的结构元素。
+
+    参数:
+        size: 结构元素的大小
+
+    返回:
+        结构元素
+    """
+    choice = rng.integers(1, 5)
+
+    if choice == 1:
+        return cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
+    elif choice == 2:
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    elif choice == 3:
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size // 2))
+    elif choice == 4:
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size // 2, size))
+
+def random_dilate(seg, min = 3, max = 10):
+    """
+    随机膨胀函数
+
+    参数:
+        seg: 输入图像（NumPy 数组，形状为 (height, width, channels)）
+        min: 结构元素的最小大小（默认为 3）
+        max: 结构元素的最大大小（默认为 10）
+
+    返回:
+        seg: 处理后的图像
+    """
+    size = rng.integers(min, max)
+    kernel = get_random_structure(size)
+    seg = cv2.dilate(seg, kernel, iterations = 1)
+    return seg
+
+def random_erode(seg, min = 3, max = 10):
+    """
+    随机腐蚀函数
+
+    参数:
+        seg: 输入图像（NumPy 数组，形状为 (height, width, channels)）
+        min: 结构元素的最小大小（默认为 3）
+        max: 结构元素的最大大小（默认为 10）
+
+    返回:
+        seg: 处理后的图像
+    """
+    size = rng.integers(min, max)
+    kernel = get_random_structure(size)
+    seg = cv2.erode(seg, kernel, iterations = 1)
+    return seg
+
+def compute_iou(seg, gt):
+    """
+    计算交并比
+
+    参数:
+        seg: 分割结果（二值掩码）
+        gt: 真实标签（二值掩码）
+
+    返回:
+        iou: 交并比
+    """
+    intersection = seg * gt
+    union = seg + gt
+    return (np.count_nonzero(intersection) + 1e-6) / (np.count_nonzero(union) + 1e-6)
+
+def select_max_region(mask):
+    """
+    选择最大连通区域
+
+    参数:
+        mask: 输入图像（二值掩码）
+
+    返回:
+        max_region: 最大连通区域
+    """
+    nums, labels, stats, _ = cv2.connectedComponetsWithStats(mask, connectivity = 8)
+    max_area = 0
+    max_label = 0
+    for i in range(1, nums):
+        if stats[i, 4] > max_area:
+            max_area = stats[i, 4]
+            max_label = i
+
+    max_region = np.where(labels == max_label, 1, 0)
+    return max_region.astype(np.uint8)
